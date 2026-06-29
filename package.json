@@ -1,0 +1,36 @@
+{
+  "name": "memhub",
+  "version": "0.2.2",
+  "type": "module",
+  "license": "MIT",
+  "description": "Smart, self-maintaining, cross-machine memory for Claude Code — Postgres-backed, no rented LLM brain.",
+  "keywords": ["claude", "claude-code", "mcp", "memory", "postgres", "pgvector", "embeddings", "ai", "agent"],
+  "author": "Husnain",
+  "homepage": "https://github.com/xhusnain/memhub#readme",
+  "repository": { "type": "git", "url": "https://github.com/xhusnain/memhub.git" },
+  "bugs": { "url": "https://github.com/xhusnain/memhub/issues" },
+  "bin": { "memhub": "dist/cli.js" },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pg": "^8.13.0",
+    "zod": "^3.23.0",
+    "@clack/prompts": "^0.7.0"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.13.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
