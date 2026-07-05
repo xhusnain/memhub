@@ -1,6 +1,6 @@
 {
   "name": "memhub",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
   "license": "MIT",
   "description": "Smart, self-maintaining, cross-machine memory for Claude Code — Postgres-backed, no rented LLM brain.",

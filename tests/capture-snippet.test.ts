@@ -12,7 +12,7 @@ describe("applyCaptureSnippet", () => {
     applyCaptureSnippet(p, "auto");
     const text = readFileSync(p, "utf8");
     expect(text).toMatch(/auto-capture START/);
-    expect(text.match(MARK)?.length).toBe(2); // START + END markers
+    expect(text.match(MARK)?.length).toBe(2);
   });
 
   it("auto is idempotent (re-running does not duplicate the block)", () => {
@@ -39,12 +39,16 @@ describe("applyCaptureSnippet", () => {
     expect(existsSync(p)).toBe(false);
   });
 
-  it("auto block includes reconciliation guidance", () => {
+  it("auto block includes reconciliation and quality guidance", () => {
     const p = join(mkdtempSync(join(tmpdir(), "cm-")), "CLAUDE.md");
     applyCaptureSnippet(p, "auto");
     const text = readFileSync(p, "utf8");
     expect(text).toMatch(/supersede/i);
     expect(text).toMatch(/confirm/i);
     expect(text).toMatch(/review/i);
+    expect(text).toMatch(/context/);
+    expect(text).toMatch(/salience/);
+    expect(text).toMatch(/absolute dates/i);
+    expect(text).toMatch(/built-in per-CLI memory/i);
   });
 });

@@ -15,14 +15,17 @@ const ConfigSchema = z.object({
   namespace: z.string().min(1),
   captureMode: z.enum(["auto", "manual"]),
   embeddings: EmbeddingsSchema,
+  clients: z.array(z.string()).default(["claude"]),
+  dreamCommand: z.array(z.string().min(1)).min(1).optional(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
+export type ConfigInput = z.input<typeof ConfigSchema>;
 
 export function configPath(baseDir = join(homedir(), ".memhub")): string {
   return join(baseDir, "config.json");
 }
 
-export function saveConfig(c: Config, baseDir?: string): void {
+export function saveConfig(c: ConfigInput, baseDir?: string): void {
   const p = configPath(baseDir);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(ConfigSchema.parse(c), null, 2));

@@ -5,23 +5,33 @@ import * as p from "@clack/prompts";
 import { saveConfig, loadConfig, type Config } from "../config.js";
 import { migrate } from "../db/migrate.js";
 import { migrateEmbeddings } from "../db/migrate-embeddings.js";
-import { registerUserMcp } from "./register-mcp.js";
+import { CLIENTS, clientByKey, detectClients, registerClient, unregisterClient, type Run, type Which } from "../clients.js";
 import { applyCaptureSnippet } from "./capture-snippet.js";
-import { redactUrl } from "../redact.js";
+import { redactUrl, redactErr } from "../redact.js";
 
 export interface InitIO {
   text(opts: { message: string; placeholder?: string; defaultValue?: string }): Promise<string>;
   select(opts: { message: string; options: { value: string; label: string; hint?: string }[]; initialValue?: string }): Promise<string>;
+  multiselect(opts: { message: string; options: { value: string; label: string; hint?: string }[]; initialValues?: string[] }): Promise<string[]>;
   password(opts: { message: string }): Promise<string>;
   confirm(opts: { message: string; initialValue?: boolean }): Promise<boolean>;
   step<T>(message: string, fn: () => Promise<T>): Promise<T>;
   info(message: string): void;
 }
 
+type Deps = {
+  io: InitIO;
+  connect: (url: string) => Promise<Pool>;
+  configDir: string;
+  home: string;
+  run?: Run;
+  which?: Which;
+  defaultNamespace?: string;
+};
+
 type ConnInfo = { pool: Pool; hasVector: boolean };
 type Conn = { pool: Pool; hasVector: boolean; url: string };
 
-function msg(e: unknown): string { return e instanceof Error ? e.message : String(e); }
 function connectedMsg(hasVector: boolean): string {
   return hasVector ? "✓ Connected (pgvector available)" : "✓ Connected (no pgvector — full-text only)";
 }
@@ -52,7 +62,7 @@ async function getValidatedConnection(
       io.info(connectedMsg(info.hasVector));
       return { pool: info.pool, hasVector: info.hasVector, url: opts.savedUrl };
     } catch (e) {
-      io.info(`✗ Saved connection failed: ${redactUrl(msg(e))} — enter a new one (Ctrl-C to cancel)`);
+      io.info(`✗ Saved connection failed: ${redactErr(e)} — enter a new one (Ctrl-C to cancel)`);
     }
   }
   for (;;) {
@@ -62,7 +72,7 @@ async function getValidatedConnection(
       io.info(connectedMsg(info.hasVector));
       return { pool: info.pool, hasVector: info.hasVector, url };
     } catch (e) {
-      io.info(`✗ Could not connect: ${redactUrl(msg(e))} — fix the URL and try again (Ctrl-C to cancel)`);
+      io.info(`✗ Could not connect: ${redactErr(e)} — fix the URL and try again (Ctrl-C to cancel)`);
     }
   }
 }
@@ -116,11 +126,23 @@ async function promptEmbeddings(io: InitIO, hasVector: boolean, existing?: Confi
   return { provider: "cloudflare", model, accountId, apiToken };
 }
 
-async function finalize(
-  deps: { io: InitIO; configDir: string; claudeMdPath: string; registerMcp: (command: string, args: string[]) => void },
-  pool: Pool,
-  cfg: Config
-): Promise<void> {
+async function promptClients(deps: Deps, existing?: Config): Promise<string[]> {
+  const detected = detectClients(deps.home, deps.which);
+  const initial = (existing?.clients ?? [...new Set(["claude", ...detected])])
+    .filter((k) => clientByKey(k));
+  const chosen = await deps.io.multiselect({
+    message: "Register memhub with these AI CLIs",
+    options: CLIENTS.map((c) => ({
+      value: c.key,
+      label: c.title,
+      hint: detected.includes(c.key) ? "detected" : "not detected",
+    })),
+    initialValues: initial,
+  });
+  return chosen.length ? chosen : ["claude"];
+}
+
+async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
   try {
     await deps.io.step("Setting up schema", async () => {
       await migrate(pool);
@@ -130,18 +152,38 @@ async function finalize(
     await pool.end().catch(() => {});
   }
   saveConfig(cfg, deps.configDir);
-  await deps.io.step("Registering with Claude Code", async () => { deps.registerMcp("memhub", ["serve"]); });
-  applyCaptureSnippet(deps.claudeMdPath, cfg.captureMode);
+  for (const key of cfg.clients) {
+    if (!clientByKey(key)) deps.io.info(`✗ ${key}: unknown client`);
+  }
+  const chosen = new Set(cfg.clients);
+  for (const adapter of CLIENTS) {
+    const instructions = adapter.instructionsFile(deps.home);
+    if (!chosen.has(adapter.key)) {
+      try { unregisterClient(adapter.key, deps.home, deps.run); } catch {}
+      if (instructions) {
+        try { applyCaptureSnippet(instructions, "manual"); } catch {}
+      }
+      continue;
+    }
+    let registered = false;
+    try {
+      registerClient(adapter.key, deps.home, deps.run);
+      registered = true;
+      deps.io.info(`✓ ${adapter.title} registered`);
+    } catch (e) {
+      deps.io.info(`✗ ${adapter.title}: ${redactErr(e)}`);
+    }
+    if (instructions && (registered || cfg.captureMode === "manual")) {
+      try {
+        applyCaptureSnippet(instructions, cfg.captureMode);
+      } catch (e) {
+        deps.io.info(`✗ ${adapter.title} instructions: ${redactErr(e)}`);
+      }
+    }
+  }
 }
 
-export async function runInitWith(deps: {
-  io: InitIO;
-  connect: (url: string) => Promise<Pool>;
-  configDir: string;
-  claudeMdPath: string;
-  registerMcp: (command: string, args: string[]) => void;
-  defaultNamespace?: string;
-}): Promise<void> {
+export async function runInitWith(deps: Deps): Promise<void> {
   const existing = tryLoadConfig(deps.configDir);
 
   if (existing) {
@@ -164,14 +206,7 @@ export async function runInitWith(deps: {
   await runWizard(deps, undefined);
 }
 
-async function runWizard(deps: {
-  io: InitIO;
-  connect: (url: string) => Promise<Pool>;
-  configDir: string;
-  claudeMdPath: string;
-  registerMcp: (command: string, args: string[]) => void;
-  defaultNamespace?: string;
-}, existing: Config | undefined): Promise<void> {
+async function runWizard(deps: Deps, existing: Config | undefined): Promise<void> {
   const conn = await getValidatedConnection(deps.io, deps.connect, { savedUrl: existing?.postgresUrl });
   const nsAnswer = (await deps.io.text({ message: "Namespace (shared across machines)", defaultValue: existing?.namespace ?? deps.defaultNamespace })).trim();
   const namespace = nsAnswer || existing?.namespace || deps.defaultNamespace || "default";
@@ -184,7 +219,8 @@ async function runWizard(deps: {
     ],
   })) as "auto" | "manual";
   const embeddings = await promptEmbeddings(deps.io, conn.hasVector, existing?.embeddings);
-  await finalize(deps, conn.pool, { postgresUrl: conn.url, namespace, captureMode, embeddings });
+  const clients = await promptClients(deps, existing);
+  await finalize(deps, conn.pool, { postgresUrl: conn.url, namespace, captureMode, embeddings, clients, dreamCommand: existing?.dreamCommand });
 }
 
 function safeUsername(): string | undefined {
@@ -201,6 +237,16 @@ const realIO: InitIO = {
     const v = await p.select({ message: opts.message, options: opts.options, initialValue: opts.initialValue });
     if (p.isCancel(v)) { p.cancel("Aborted."); process.exit(1); }
     return v as string;
+  },
+  async multiselect(opts) {
+    const v = await p.multiselect({
+      message: opts.message,
+      options: opts.options,
+      initialValues: opts.initialValues,
+      required: false,
+    });
+    if (p.isCancel(v)) { p.cancel("Aborted."); process.exit(1); }
+    return (v as string[]) ?? [];
   },
   async password(opts) {
     const v = await p.password({ message: opts.message });
@@ -228,11 +274,10 @@ export function runInit(): void {
       io: realIO,
       connect: async (url) => new Pool({ connectionString: url }),
       configDir: join(homedir(), ".memhub"),
-      claudeMdPath: join(homedir(), ".claude", "CLAUDE.md"),
-      registerMcp: (command, args) => registerUserMcp(command, args),
+      home: homedir(),
       defaultNamespace: safeUsername(),
     });
-    p.outro("Done. Restart Claude Code — memory tools are available in every project.");
+    p.outro("Done. Restart your AI CLIs — the memory tools are available everywhere.");
   })().catch((err) => {
     p.cancel(`Error: ${redactUrl(err instanceof Error ? err.message : String(err))}`);
     process.exit(1);

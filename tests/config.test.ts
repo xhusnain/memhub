@@ -9,7 +9,7 @@ describe("config (global)", () => {
     const base = join(mkdtempSync(join(tmpdir(), "cm-")), "nested");
     const cfg = { postgresUrl: "postgres://x", namespace: "husnain", captureMode: "auto" as const, embeddings: { provider: "none" as const } };
     saveConfig(cfg, base);
-    expect(loadConfig(base)).toEqual(cfg);
+    expect(loadConfig(base)).toEqual({ ...cfg, clients: ["claude"] });
     expect(configPath(base)).toBe(join(base, "config.json"));
   });
 
@@ -23,7 +23,28 @@ describe("config (global)", () => {
     const cfg = { postgresUrl: "postgres://x", namespace: "h", captureMode: "auto" as const,
       embeddings: { provider: "openai" as const, model: "text-embedding-3-small", apiKey: "sk" } };
     saveConfig(cfg, base);
+    expect(loadConfig(base)).toEqual({ ...cfg, clients: ["claude"] });
+  });
+
+  it("round-trips clients and dreamCommand", () => {
+    const base = mkdtempSync(join(tmpdir(), "cm-"));
+    const cfg = {
+      postgresUrl: "postgres://x", namespace: "h", captureMode: "auto" as const,
+      embeddings: { provider: "none" as const },
+      clients: ["claude", "codex", "gemini"],
+      dreamCommand: ["codex", "exec", "--full-auto"],
+    };
+    saveConfig(cfg, base);
     expect(loadConfig(base)).toEqual(cfg);
+  });
+
+  it("defaults clients for a legacy config file", () => {
+    const base = mkdtempSync(join(tmpdir(), "cm-"));
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, "config.json"), JSON.stringify({
+      postgresUrl: "postgres://x", namespace: "h", captureMode: "auto", embeddings: { provider: "none" },
+    }));
+    expect(loadConfig(base).clients).toEqual(["claude"]);
   });
 
   it("throws a clear error when the config is invalid", () => {

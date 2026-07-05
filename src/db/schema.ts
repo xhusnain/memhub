@@ -1,3 +1,5 @@
+export const SCHEMA_VERSION = "2";
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memories (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -24,4 +26,30 @@ CREATE TABLE IF NOT EXISTS memhub_meta (
   value      text NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS content_hash text
+  GENERATED ALWAYS AS (md5(lower(regexp_replace(btrim(content), '\\s+', ' ', 'g')))) STORED;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS salience real NOT NULL DEFAULT 0.5;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS client text;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS observed_at timestamptz;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS access_count int NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS fts_simple tsvector
+  GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;
+CREATE INDEX IF NOT EXISTS memories_fts_simple_idx ON memories USING gin (fts_simple);
+`;
+
+export const BACKFILL_SQL = `
+WITH ranked AS (
+  SELECT id, row_number() OVER (
+    PARTITION BY namespace, content_hash
+    ORDER BY last_confirmed_at DESC, created_at DESC
+  ) AS rn FROM memories WHERE status = 'active'
+)
+UPDATE memories m SET status = 'archived' FROM ranked r WHERE m.id = r.id AND r.rn > 1;
+`;
+
+export const HASH_INDEX_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS memories_active_hash_idx
+  ON memories (namespace, content_hash) WHERE status = 'active';
 `;

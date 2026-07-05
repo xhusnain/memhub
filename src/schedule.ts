@@ -3,15 +3,13 @@ import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 
-// Resolve the directories that contain `memhub` and `claude`, so the scheduled
-// job's PATH can find both (cron/launchd start with a minimal PATH).
 export function resolveBins(): { memhubPath: string; pathDirs: string[] } {
-  const nodeBinDir = dirname(process.execPath); // nvm: node + global bins colocated
+  const nodeBinDir = dirname(process.execPath);
   const candidates = [
     nodeBinDir,
-    join(homedir(), ".local", "bin"),     // claude default (Linux/mac)
-    "/opt/homebrew/bin",                  // mac (Apple silicon Homebrew)
-    "/usr/local/bin",                     // mac (Intel Homebrew) / linux
+    join(homedir(), ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
   ];
   const which = (bin: string): string | null => {
     try { return execFileSync("which", [bin], { encoding: "utf8" }).trim().split("\n")[0] || null; }
@@ -81,13 +79,13 @@ export function installSchedule(): void {
     const p = PLIST_PATH();
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, buildLaunchdPlist({ memhubPath, pathDirs, logPath: LOG_PATH() }));
-    try { execFileSync("launchctl", ["unload", p], { stdio: "ignore" }); } catch { /* not loaded */ }
+    try { execFileSync("launchctl", ["unload", p], { stdio: "ignore" }); } catch {}
     execFileSync("launchctl", ["load", p], { stdio: "inherit" });
     console.log(`Installed launchd agent → ${p} (runs nightly at 03:00; log: ${LOG_PATH()})`);
   } else {
     const line = buildCronLine({ pathDirs });
     let existing = "";
-    try { existing = execFileSync("crontab", ["-l"], { encoding: "utf8" }); } catch { /* no crontab yet */ }
+    try { existing = execFileSync("crontab", ["-l"], { encoding: "utf8" }); } catch {}
     const kept = existing.split("\n").filter((l) => l && !l.includes("memhub dream")).join("\n");
     const next = (kept ? kept + "\n" : "") + line + "\n";
     execFileSync("crontab", ["-"], { input: next });

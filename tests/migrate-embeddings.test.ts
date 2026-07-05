@@ -17,7 +17,7 @@ afterAll(async () => { await pool.end(); await container.stop(); });
 describe("migrateEmbeddings", () => {
   it("creates the vector extension and memory_embeddings table, idempotently", async () => {
     await migrateEmbeddings(pool);
-    await migrateEmbeddings(pool); // idempotent
+    await migrateEmbeddings(pool);
     const ext = await pool.query("select 1 from pg_extension where extname='vector'");
     expect(ext.rowCount).toBe(1);
     const cols = (await pool.query(

@@ -1,4 +1,4 @@
-import { redactUrl } from "./redact.js";
+import { redactErr } from "./redact.js";
 
 const [, , command] = process.argv;
 
@@ -28,6 +28,6 @@ async function main() {
   }
 }
 main().catch((err) => {
-  console.error(redactUrl(err instanceof Error ? err.message : String(err)));
+  console.error(redactErr(err));
   process.exit(1);
 });
