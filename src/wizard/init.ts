@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { Pool } from "pg";
 import * as p from "@clack/prompts";
@@ -10,6 +11,7 @@ import { applyCaptureSnippet } from "./capture-snippet.js";
 import { redactUrl, redactErr } from "../redact.js";
 import { ensureLocalDb, localSupported, setupLocalDb, type LocalSetup } from "../localdb.js";
 import { VERSION } from "../version.js";
+import { adjustPostgresUrl } from "../db/url.js";
 import { execFileSync } from "node:child_process";
 
 export interface InitIO {
@@ -36,6 +38,7 @@ type Deps = {
     ensure(cfg: Pick<Config, "localDb">): Promise<void>;
   };
   selfInstall?: { needed(): boolean; install(): void };
+  command?: () => string | null;
   options?: { yes?: boolean; url?: string };
 };
 
@@ -67,23 +70,29 @@ async function getValidatedConnection(
   opts: { savedUrl?: string; trySavedSilently?: boolean; fixedUrl?: string; interactive?: boolean }
 ): Promise<Conn> {
   if (opts.fixedUrl || opts.interactive === false) {
-    const url = (opts.fixedUrl ?? opts.savedUrl ?? "").trim();
+    const adjusted = adjustPostgresUrl(opts.fixedUrl ?? opts.savedUrl ?? "");
+    const url = adjusted.url;
     if (!url) throw new Error("No database to connect to. Pass --url <postgres-url>, or run memhub init without --yes.");
+    for (const note of adjusted.notes) io.info(note);
     const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, url));
     io.info(connectedMsg(info.hasVector));
     return { pool: info.pool, hasVector: info.hasVector, url };
   }
   if (opts.savedUrl && opts.trySavedSilently) {
     try {
-      const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, opts.savedUrl!));
+      const adjusted = adjustPostgresUrl(opts.savedUrl);
+      for (const note of adjusted.notes) io.info(note);
+      const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, adjusted.url));
       io.info(connectedMsg(info.hasVector));
-      return { pool: info.pool, hasVector: info.hasVector, url: opts.savedUrl };
+      return { pool: info.pool, hasVector: info.hasVector, url: adjusted.url };
     } catch (e) {
       io.info(`✗ Saved connection failed: ${redactErr(e)} — enter a new one (Ctrl-C to cancel)`);
     }
   }
   for (;;) {
-    const url = (await io.text({ message: "Postgres connection string", defaultValue: opts.savedUrl })).trim();
+    const adjusted = adjustPostgresUrl(await io.text({ message: "Postgres connection string", defaultValue: opts.savedUrl }));
+    const url = adjusted.url;
+    for (const note of adjusted.notes) io.info(note);
     try {
       const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, url));
       io.info(connectedMsg(info.hasVector));
@@ -184,6 +193,10 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
       deps.io.info("⚠ Skipped. Your AI CLIs need the memhub command on PATH — run: npm install -g memhub");
     }
   }
+  const bin = deps.command?.() ?? "memhub";
+  if (bin !== "memhub") {
+    deps.io.info(`memhub is not on your PATH, so your AI CLIs will start it from ${bin}`);
+  }
   for (const key of cfg.clients) {
     if (!clientByKey(key)) deps.io.info(`✗ ${key}: unknown client`);
   }
@@ -200,7 +213,7 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     }
     let registered = false;
     try {
-      registerClient(adapter.key, deps.home, deps.run);
+      registerClient(adapter.key, deps.home, deps.run, bin);
       registered = true;
       deps.io.info(`✓ ${adapter.title} registered`);
     } catch (e) {
@@ -209,7 +222,7 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     if (adapter.installHooks && adapter.removeHooks) {
       try {
         if (registered && cfg.captureMode === "auto") {
-          adapter.installHooks(deps.home);
+          adapter.installHooks(deps.home, bin);
           deps.io.info(`✓ ${adapter.title} hooks installed (automatic recall and after-session reflection)`);
         } else {
           adapter.removeHooks(deps.home);
@@ -287,7 +300,7 @@ export async function runInitWith(deps: Deps): Promise<void> {
       const conn = await getValidatedConnection(deps.io, deps.connect, {
         savedUrl: existing.postgresUrl, trySavedSilently: true, interactive: deps.options?.yes !== true,
       });
-      const localDb = conn.url === existing.postgresUrl ? existing.localDb : undefined;
+      const localDb = existing.localDb && new URL(conn.url).host === new URL(existing.postgresUrl).host ? existing.localDb : undefined;
       await finalize(deps, conn.pool, { ...existing, postgresUrl: conn.url, localDb });
       return;
     }
@@ -397,6 +410,20 @@ export function installedOutsideNpx(run: (file: string, args: string[]) => strin
   }
 }
 
+export function resolveMemhubCommand(
+  onPath: () => boolean = installedOutsideNpx,
+  globalBin: () => string = () => join(execFileSync("npm", ["prefix", "-g"], { encoding: "utf8" }).trim(), "bin", "memhub"),
+  exists: (path: string) => boolean = existsSync
+): string | null {
+  if (onPath()) return "memhub";
+  try {
+    const path = globalBin();
+    return exists(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseInitArgs(args: string[]): { yes: boolean; url?: string } {
   const i = args.indexOf("--url");
   return { yes: args.includes("--yes") || args.includes("-y"), url: i >= 0 ? args[i + 1] : undefined };
@@ -423,9 +450,10 @@ export function runInit(args: string[] = []): void {
       defaultNamespace: safeUsername(),
       local: { supported: localSupported, setup: setupLocalDb, ensure: ensureLocalDb },
       selfInstall: {
-        needed: () => !installedOutsideNpx(),
+        needed: () => resolveMemhubCommand() === null,
         install: () => { execFileSync("npm", ["install", "-g", `memhub@${VERSION}`], { stdio: "ignore" }); },
       },
+      command: resolveMemhubCommand,
       options,
     });
     if (options.yes) console.log("\nDone.\n" + NEXT_STEPS.map((l, i) => `  ${i + 1}. ${l}`).join("\n"));

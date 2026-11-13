@@ -93,7 +93,7 @@ describe("registerClient (command adapters)", () => {
     registerClient("claude", home(), (f, a) => calls.push([f, a]));
     expect(calls).toEqual([
       ["claude", ["mcp", "remove", "--scope", "user", "memhub"]],
-      ["claude", ["mcp", "add", "--scope", "user", "--env", "MEMHUB_CLIENT=claude", "memhub", "--", "memhub", "serve"]],
+      ["claude", ["mcp", "add", "--scope", "user", "memhub", "-e", "MEMHUB_CLIENT=claude", "--", "memhub", "serve"]],
     ]);
   });
 
@@ -223,6 +223,19 @@ describe("claude hooks", () => {
     claude.installHooks!(h);
     claude.removeHooks!(h);
     expect(settings(h).hooks).toBeUndefined();
+  });
+
+  it("recognises, replaces, and removes hooks that use a full path, quoted when it has spaces", () => {
+    const h = home();
+    claude.installHooks!(h, "/Users/Jane Doe/node/bin/memhub");
+    expect(settings(h).hooks.SessionEnd[0].hooks[0].command).toBe('"/Users/Jane Doe/node/bin/memhub" hook session-end');
+    expect(claude.hooksInstalled!(h)).toBe(true);
+    claude.installHooks!(h, "/opt/node/bin/memhub");
+    expect(settings(h).hooks.SessionEnd).toHaveLength(1);
+    expect(settings(h).hooks.SessionEnd[0].hooks[0].command).toBe("/opt/node/bin/memhub hook session-end");
+    claude.removeHooks!(h);
+    expect(settings(h).hooks).toBeUndefined();
+    expect(claude.hooksInstalled!(h)).toBe(false);
   });
 
   it("only claude has hook installation for now", () => {

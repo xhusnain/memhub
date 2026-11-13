@@ -8,7 +8,7 @@ import { clientByKey } from "./clients.js";
 import { openPool, portOpen, startLocalDb, stopLocalDb } from "./localdb.js";
 import { pendingSessions, queueDir } from "./reflect.js";
 import { redactErr } from "./redact.js";
-import { installedOutsideNpx } from "./wizard/init.js";
+import { resolveMemhubCommand } from "./wizard/init.js";
 
 const RECENT_ERROR_DAYS = 7;
 
@@ -19,7 +19,7 @@ export type DoctorDeps = {
   home: string;
   connect: (url: string) => Promise<Pool>;
   onPath: (bin: string) => boolean;
-  installed: () => boolean;
+  command: () => string | null;
 };
 
 function lastHookError(baseDir: string): string | null {
@@ -42,9 +42,10 @@ export async function runChecks(deps: DoctorDeps): Promise<Check[]> {
   }
   checks.push({ ok: true, label: `Config found — namespace "${cfg.namespace}", ${cfg.captureMode} capture, ${cfg.localDb ? "local database" : "your own Postgres"}` });
 
-  checks.push(deps.installed()
-    ? { ok: true, label: "memhub command is installed" }
-    : { ok: false, label: "memhub command is not on PATH, so AI CLIs cannot start it", fix: "npm install -g memhub" });
+  const bin = deps.command();
+  checks.push(bin
+    ? { ok: true, label: bin === "memhub" ? "memhub command is installed" : `memhub command is installed at ${bin} (not on PATH; AI CLIs use the full path)` }
+    : { ok: false, label: "memhub command is not installed, so AI CLIs cannot start it", fix: "npm install -g memhub, then memhub init (choose Keep & re-apply)" });
 
   try {
     const pool = await deps.connect(cfg.postgresUrl);
@@ -109,7 +110,7 @@ export async function runDoctor(): Promise<void> {
     home: homedir(),
     connect: (url) => openPool(url, { connectionTimeoutMillis: 5000 }),
     onPath,
-    installed: installedOutsideNpx,
+    command: resolveMemhubCommand,
   });
   console.log(formatChecks(checks));
   const failed = checks.filter((c) => !c.ok).length;

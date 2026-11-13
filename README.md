@@ -99,11 +99,21 @@ systems use your own Postgres.
 
 To use your own database without the wizard: `npx memhub init --yes --url postgres://…`.
 
+Two things to know about a hosted database:
+
+- **Use a direct connection, not a transaction pooler.** The background passes take session locks,
+  which PgBouncer in transaction mode does not keep. On Neon you can paste either connection
+  string: memhub switches the pooled one (`-pooler` in the host) to the direct one and tells you.
+- **Pick a region near you.** Each hook opens its own connection, so the network round trip to the
+  database is paid on every request. A database on another continent adds about 3 seconds per
+  request; a nearby region or the local database adds a fraction of that.
+
 ### What setup changes on your machine
 
 - `~/.memhub/` — config, and the local database if you chose it.
 - The `memhub` command, installed with `npm install -g memhub` if it is not already there (setup
-  asks first). Your AI CLIs start memhub through this command.
+  asks first). Your AI CLIs start memhub through this command. If npm's global folder is not on
+  your `PATH`, setup registers the command's full path instead and says so.
 - Each chosen AI CLI: a `memhub` MCP server entry and, in automatic mode, an instruction block in
   its global instructions file. Claude Code also gets four hooks in `~/.claude/settings.json`.
 

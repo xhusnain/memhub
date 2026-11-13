@@ -71,7 +71,12 @@ function jsonDeleteEntry(path: string, del: (obj: Record<string, unknown>) => vo
   writeJson(path, obj);
 }
 
-const HOOK_PREFIX = "memhub hook ";
+export const DEFAULT_BIN = "memhub";
+const HOOK_RE = /(^|[\/"])memhub"? hook ([a-z-]+)$/;
+
+function hookCommand(bin: string, arg: string): string {
+  return `${/\s/.test(bin) ? `"${bin}"` : bin} hook ${arg}`;
+}
 const CLAUDE_HOOKS: [string, string][] = [
   ["SessionStart", "session-start"],
   ["UserPromptSubmit", "prompt"],
@@ -80,7 +85,7 @@ const CLAUDE_HOOKS: [string, string][] = [
 ];
 
 function isMemhubHook(h: unknown): boolean {
-  return isPlainObject(h) && typeof h.command === "string" && h.command.startsWith(HOOK_PREFIX);
+  return isPlainObject(h) && typeof h.command === "string" && HOOK_RE.test(h.command);
 }
 
 function stripMemhubHooks(o: Record<string, unknown>): void {
@@ -98,14 +103,14 @@ function stripMemhubHooks(o: Record<string, unknown>): void {
   if (!Object.keys(hooks).length) delete o.hooks;
 }
 
-function installClaudeHooks(home: string): void {
+function installClaudeHooks(home: string, bin: string = DEFAULT_BIN): void {
   const path = join(home, ".claude", "settings.json");
   jsonMergeFile(path, (o) => {
     stripMemhubHooks(o);
     const hooks = objAt(o, "hooks", path);
     for (const [event, arg] of CLAUDE_HOOKS) {
       const groups = Array.isArray(hooks[event]) ? [...(hooks[event] as unknown[])] : [];
-      groups.push({ hooks: [{ type: "command", command: HOOK_PREFIX + arg, timeout: 10 }] });
+      groups.push({ hooks: [{ type: "command", command: hookCommand(bin, arg), timeout: 10 }] });
       hooks[event] = groups;
     }
     o.hooks = hooks;
@@ -120,7 +125,7 @@ function claudeHooksInstalled(home: string): boolean {
     const groups = hooks[event];
     return Array.isArray(groups) && groups.some((g) =>
       isPlainObject(g) && Array.isArray(g.hooks) &&
-      g.hooks.some((h) => isPlainObject(h) && h.command === HOOK_PREFIX + arg));
+      g.hooks.some((h) => isPlainObject(h) && typeof h.command === "string" && HOOK_RE.exec(h.command)?.[2] === arg));
   });
 }
 
@@ -134,9 +139,9 @@ export type ClientAdapter = {
   bins: string[];
   configDir(home: string): string;
   instructionsFile(home: string): string | null;
-  register(home: string, run: Run): void;
+  register(home: string, run: Run, bin?: string): void;
   unregister(home: string, run: Run): void;
-  installHooks?(home: string): void;
+  installHooks?(home: string, bin?: string): void;
   removeHooks?(home: string): void;
   hooksInstalled?(home: string): boolean;
 };
@@ -148,11 +153,11 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["claude"],
     configDir: (home) => join(home, ".claude"),
     instructionsFile: (home) => join(home, ".claude", "CLAUDE.md"),
-    register: (_home, run) => {
+    register: (_home, run, bin = DEFAULT_BIN) => {
       try {
         run("claude", ["mcp", "remove", "--scope", "user", "memhub"]);
       } catch {}
-      run("claude", ["mcp", "add", "--scope", "user", "--env", "MEMHUB_CLIENT=claude", "memhub", "--", "memhub", "serve"]);
+      run("claude", ["mcp", "add", "--scope", "user", "memhub", "-e", "MEMHUB_CLIENT=claude", "--", bin, "serve"]);
     },
     unregister: (_home, run) => {
       try {
@@ -169,11 +174,11 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["codex"],
     configDir: (home) => join(home, ".codex"),
     instructionsFile: (home) => join(home, ".codex", "AGENTS.md"),
-    register: (_home, run) => {
+    register: (_home, run, bin = DEFAULT_BIN) => {
       try {
         run("codex", ["mcp", "remove", "memhub"]);
       } catch {}
-      run("codex", ["mcp", "add", "memhub", "--env", "MEMHUB_CLIENT=codex", "--", "memhub", "serve"]);
+      run("codex", ["mcp", "add", "memhub", "--env", "MEMHUB_CLIENT=codex", "--", bin, "serve"]);
     },
     unregister: (_home, run) => {
       try {
@@ -187,11 +192,11 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["gemini"],
     configDir: (home) => join(home, ".gemini"),
     instructionsFile: (home) => join(home, ".gemini", "GEMINI.md"),
-    register: (home) => {
+    register: (home, _run, bin = DEFAULT_BIN) => {
       const path = join(home, ".gemini", "settings.json");
       jsonMergeFile(path, (o) => {
         const servers = objAt(o, "mcpServers", path);
-        servers.memhub = { command: "memhub", args: ["serve"], env: { MEMHUB_CLIENT: "gemini" } };
+        servers.memhub = { command: bin, args: ["serve"], env: { MEMHUB_CLIENT: "gemini" } };
         o.mcpServers = servers;
       });
     },
@@ -207,11 +212,11 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["opencode"],
     configDir: (home) => join(home, ".config", "opencode"),
     instructionsFile: (home) => join(home, ".config", "opencode", "AGENTS.md"),
-    register: (home) => {
+    register: (home, _run, bin = DEFAULT_BIN) => {
       const path = join(home, ".config", "opencode", "opencode.json");
       jsonMergeFile(path, (o) => {
         const mcp = objAt(o, "mcp", path);
-        mcp.memhub = { type: "local", command: ["memhub", "serve"], enabled: true, environment: { MEMHUB_CLIENT: "opencode" } };
+        mcp.memhub = { type: "local", command: [bin, "serve"], enabled: true, environment: { MEMHUB_CLIENT: "opencode" } };
         o.mcp = mcp;
       });
     },
@@ -227,12 +232,12 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["openclaw"],
     configDir: (home) => join(home, ".openclaw"),
     instructionsFile: (home) => join(home, ".openclaw", "workspace", "AGENTS.md"),
-    register: (home) => {
+    register: (home, _run, bin = DEFAULT_BIN) => {
       const path = join(home, ".openclaw", "openclaw.json");
       jsonMergeFile(path, (o) => {
         const mcp = objAt(o, "mcp", path);
         const servers = objAt(mcp, "servers", path);
-        servers.memhub = { command: "memhub", args: ["serve"] };
+        servers.memhub = { command: bin, args: ["serve"] };
         mcp.servers = servers;
         o.mcp = mcp;
       });
@@ -249,11 +254,11 @@ export const CLIENTS: ClientAdapter[] = [
     bins: ["cursor-agent", "agent", "cursor"],
     configDir: (home) => join(home, ".cursor"),
     instructionsFile: () => null,
-    register: (home) => {
+    register: (home, _run, bin = DEFAULT_BIN) => {
       const path = join(home, ".cursor", "mcp.json");
       jsonMergeFile(path, (o) => {
         const servers = objAt(o, "mcpServers", path);
-        servers.memhub = { command: "memhub", args: ["serve"], env: { MEMHUB_CLIENT: "cursor" } };
+        servers.memhub = { command: bin, args: ["serve"], env: { MEMHUB_CLIENT: "cursor" } };
         o.mcpServers = servers;
       });
     },
@@ -273,10 +278,10 @@ export function detectClients(home: string, which: Which = defaultWhich): Client
   return CLIENTS.filter((c) => existsSync(c.configDir(home)) || c.bins.some(which)).map((c) => c.key);
 }
 
-export function registerClient(key: string, home: string, run: Run = defaultRun): void {
+export function registerClient(key: string, home: string, run: Run = defaultRun, bin: string = DEFAULT_BIN): void {
   const adapter = clientByKey(key);
   if (!adapter) throw new Error(`Unknown client: ${key}`);
-  adapter.register(home, run);
+  adapter.register(home, run, bin);
 }
 
 export function unregisterClient(key: string, home: string, run: Run = defaultRun): void {

@@ -19,7 +19,7 @@ const PROMPT_K = 3;
 const LINE_MAX_CHARS = 280;
 const PROMPT_MIN_CHARS = 12;
 const DB_TIMEOUT_MS = 8000;
-const CONNECT_TIMEOUT_MS = 3000;
+const CONNECT_TIMEOUT_MS = 6000;
 
 export type HookEvent = "session-start" | "prompt" | "pre-compact" | "session-end";
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { Pool } from "pg";
-import { runInitWith, installedOutsideNpx, parseInitArgs, type InitIO } from "../src/wizard/init.js";
+import { runInitWith, installedOutsideNpx, parseInitArgs, resolveMemhubCommand, type InitIO } from "../src/wizard/init.js";
 import { VERSION } from "../src/version.js";
 import { saveConfig } from "../src/config.js";
 
@@ -85,7 +85,7 @@ function makeDeps(base: string) {
 
 const CLAUDE_PAIR = [
   ["claude", ["mcp", "remove", "--scope", "user", "memhub"]],
-  ["claude", ["mcp", "add", "--scope", "user", "--env", "MEMHUB_CLIENT=claude", "memhub", "--", "memhub", "serve"]],
+  ["claude", ["mcp", "add", "--scope", "user", "memhub", "-e", "MEMHUB_CLIENT=claude", "--", "memhub", "serve"]],
 ];
 
 const claudeCalls = (runs: Array<[string, string[]]>) => runs.filter(([f]) => f === "claude");
@@ -333,6 +333,35 @@ describe("easy onboarding", () => {
     expect(installs).toBe(1);
   });
 
+  it("registers every CLI and hook with the full path when memhub is not on PATH", async () => {
+    const base = mkdtempSync(join(tmpdir(), "cm-"));
+    const { home, runs, deps } = makeDeps(base);
+    const bin = "/opt/node/bin/memhub";
+    const { io, infos } = makeIO({ connQueue: [uri], capture: "auto", embeddings: "none", clients: ["claude", "codex", "gemini", "cursor", "opencode"] });
+    await runInitWith({ io, ...deps, command: () => bin });
+    expect(infos.some((m) => m.includes(`will start it from ${bin}`))).toBe(true);
+    expect(runs).toContainEqual(["claude", ["mcp", "add", "--scope", "user", "memhub", "-e", "MEMHUB_CLIENT=claude", "--", bin, "serve"]]);
+    expect(runs).toContainEqual(["codex", ["mcp", "add", "memhub", "--env", "MEMHUB_CLIENT=codex", "--", bin, "serve"]]);
+    expect(JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8")).mcpServers.memhub.command).toBe(bin);
+    expect(JSON.parse(readFileSync(join(home, ".cursor", "mcp.json"), "utf8")).mcpServers.memhub.command).toBe(bin);
+    expect(JSON.parse(readFileSync(join(home, ".config", "opencode", "opencode.json"), "utf8")).mcp.memhub.command).toEqual([bin, "serve"]);
+    const hooks = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).hooks;
+    expect(hooks.UserPromptSubmit[0].hooks[0].command).toBe(`${bin} hook prompt`);
+  });
+
+  it("keep & re-apply moves a saved Neon pooled URL to the direct one", async () => {
+    const base = mkdtempSync(join(tmpdir(), "cm-"));
+    const { configDir, deps } = makeDeps(base);
+    const pooled = "postgresql://u:p@ep-cool-dawn-123456-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require";
+    saveConfig({ postgresUrl: pooled, namespace: "sam", captureMode: "manual", embeddings: { provider: "none" }, clients: [] }, configDir);
+    const seen: string[] = [];
+    const { io, infos } = makeIO({ connQueue: [], capture: "manual", embeddings: "none", action: "keep" });
+    await runInitWith({ io, ...deps, connect: async (u: string) => { seen.push(u); return new Pool({ connectionString: uri }); } });
+    expect(seen[0]).toBe("postgresql://u:p@ep-cool-dawn-123456.us-east-2.aws.neon.tech/neondb?sslmode=verify-full");
+    expect(JSON.parse(readFileSync(join(configDir, "config.json"), "utf8")).postgresUrl).toBe(seen[0]);
+    expect(infos.some((m) => /switched from the pooled connection/.test(m))).toBe(true);
+  });
+
   it("--url uses that database without asking, even over an existing config", async () => {
     const base = mkdtempSync(join(tmpdir(), "cm-"));
     const { configDir, deps } = makeDeps(base);
@@ -366,6 +395,13 @@ describe("init helpers", () => {
     expect(installedOutsideNpx(() => "/repo/node_modules/.bin/memhub\n")).toBe(false);
     expect(installedOutsideNpx(() => "/Users/x/.npm/_npx/abc/node_modules/.bin/memhub\n/opt/homebrew/bin/memhub\n")).toBe(true);
     expect(installedOutsideNpx(() => { throw new Error("not found"); })).toBe(false);
+  });
+
+  it("resolves the memhub command: PATH first, then npm's global folder, else nothing", () => {
+    expect(resolveMemhubCommand(() => true)).toBe("memhub");
+    expect(resolveMemhubCommand(() => false, () => "/g/bin/memhub", () => true)).toBe("/g/bin/memhub");
+    expect(resolveMemhubCommand(() => false, () => "/g/bin/memhub", () => false)).toBeNull();
+    expect(resolveMemhubCommand(() => false, () => { throw new Error("no npm"); })).toBeNull();
   });
 
   it("keeps the version constant in step with package.json", () => {

@@ -1,16 +1,35 @@
 {
   "name": "memhub",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "type": "module",
   "license": "MIT",
   "description": "A personal memory for every AI CLI that learns how you work without being asked — Postgres-backed, no rented LLM brain.",
-  "keywords": ["claude", "claude-code", "mcp", "memory", "postgres", "pgvector", "embeddings", "ai", "agent"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "memory",
+    "postgres",
+    "pgvector",
+    "embeddings",
+    "ai",
+    "agent"
+  ],
   "author": "Husnain",
   "homepage": "https://github.com/xhusnain/memhub#readme",
-  "repository": { "type": "git", "url": "https://github.com/xhusnain/memhub.git" },
-  "bugs": { "url": "https://github.com/xhusnain/memhub/issues" },
-  "bin": { "memhub": "dist/cli.js" },
-  "files": ["dist"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xhusnain/memhub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xhusnain/memhub/issues"
+  },
+  "bin": {
+    "memhub": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -18,12 +37,14 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@clack/prompts": "^0.7.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "pg": "^8.13.0",
-    "zod": "^3.23.0",
-    "@clack/prompts": "^0.7.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^10.13.0",

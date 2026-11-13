@@ -32,7 +32,7 @@ function setup(over: Partial<DoctorDeps> = {}) {
     baseDir, home,
     connect: async (url) => new Pool({ connectionString: url, connectionTimeoutMillis: 1500 }),
     onPath: () => true,
-    installed: () => true,
+    command: () => "memhub",
     ...over,
   };
   return { deps, baseDir, home };
@@ -63,12 +63,12 @@ describe("memhub doctor", () => {
   });
 
   it("names each problem with the command that fixes it", async () => {
-    const { deps, baseDir } = setup({ onPath: () => false, installed: () => false });
+    const { deps, baseDir } = setup({ onPath: () => false, command: () => null });
     saveConfig({ postgresUrl: "postgres://nobody:x@127.0.0.1:1/none", namespace: "doc", captureMode: "auto", embeddings: { provider: "none" }, clients: ["claude"] }, baseDir);
     enqueueSession({ sessionId: "s1", transcriptPath: "/tmp/none.jsonl" }, queueDir(baseDir));
     writeFileSync(join(baseDir, "hooks.log"), `${new Date().toISOString()} prompt: timed out after 8000ms\n`);
     const text = formatChecks(await runChecks(deps));
-    expect(text).toMatch(/✗ memhub command is not on PATH[^\n]*\n    → npm install -g memhub/);
+    expect(text).toMatch(/✗ memhub command is not installed[^\n]*\n    → npm install -g memhub/);
     expect(text).toMatch(/✗ Database not reachable[^\n]*\n    → check the connection string/);
     expect(text).not.toMatch(/nobody:x@/);
     expect(text).toMatch(/✗ Claude Code: memory hooks are missing[^\n]*\n    → memhub init/);
@@ -76,6 +76,16 @@ describe("memhub doctor", () => {
     expect(text).toMatch(/✗ Background learning cannot run: claude is not on PATH/);
     expect(text).toMatch(/✓ 1 session\(s\) waiting/);
     expect(text).toMatch(/✗ A hook failed recently: [^\n]*timed out/);
+  });
+
+  it("accepts a memhub that is installed off PATH and says where", async () => {
+    const { deps, baseDir, home } = setup({ command: () => "/opt/node/bin/memhub" });
+    saveConfig({ postgresUrl: container.getConnectionUri(), namespace: "doc", captureMode: "auto", embeddings: { provider: "none" }, clients: ["claude"] }, baseDir);
+    clientByKey("claude")!.installHooks!(home, "/opt/node/bin/memhub");
+    applyCaptureSnippet(clientByKey("claude")!.instructionsFile(home)!, "auto");
+    const checks = await runChecks(deps);
+    expect(checks.every((c) => c.ok)).toBe(true);
+    expect(formatChecks(checks)).toMatch(/installed at \/opt\/node\/bin\/memhub \(not on PATH/);
   });
 
   it("does not ask for hooks or a runner in manual mode, and ignores old hook errors", async () => {
