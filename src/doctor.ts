@@ -44,7 +44,7 @@ export async function runChecks(deps: DoctorDeps): Promise<Check[]> {
 
   const bin = deps.command();
   checks.push(bin
-    ? { ok: true, label: bin === "memhub" ? "memhub command is installed" : `memhub command is installed at ${bin} (not on PATH; AI CLIs use the full path)` }
+    ? { ok: true, label: `memhub command is installed at ${bin}` }
     : { ok: false, label: "memhub command is not installed, so AI CLIs cannot start it", fix: "npm install -g memhub, then memhub init (choose Keep & re-apply)" });
 
   try {
@@ -68,6 +68,12 @@ export async function runChecks(deps: DoctorDeps): Promise<Check[]> {
   for (const key of cfg.clients) {
     const adapter = clientByKey(key);
     if (!adapter) continue;
+    const registered = adapter.registeredCommand?.(deps.home);
+    if (registered !== undefined && registered !== null && !registered.startsWith("/")) {
+      checks.push(deps.onPath(registered)
+        ? { ok: true, label: `${adapter.title}: starts memhub as "${registered}"` }
+        : { ok: false, label: `${adapter.title}: registered to start "${registered}", which is not on PATH`, fix: "memhub init (choose Keep & re-apply)" });
+    }
     if (cfg.captureMode === "auto" && adapter.hooksInstalled) {
       checks.push(adapter.hooksInstalled(deps.home)
         ? { ok: true, label: `${adapter.title}: memory hooks installed` }

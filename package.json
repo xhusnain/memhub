@@ -1,6 +1,6 @@
 {
   "name": "memhub",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "type": "module",
   "license": "MIT",
   "description": "A personal memory for every AI CLI that learns how you work without being asked — Postgres-backed, no rented LLM brain.",

@@ -180,7 +180,7 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
   saveConfig(cfg, deps.configDir);
   if (deps.selfInstall?.needed()) {
     const ok = await deps.io.confirm({
-      message: `Install memhub on this machine so your AI CLIs can start it? (npm install -g memhub@${VERSION})`,
+      message: `Install memhub ${VERSION} on this machine so your AI CLIs can start it? (npm install -g memhub@${VERSION})`,
       initialValue: true,
     });
     if (ok) {
@@ -194,9 +194,7 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     }
   }
   const bin = deps.command?.() ?? "memhub";
-  if (bin !== "memhub") {
-    deps.io.info(`memhub is not on your PATH, so your AI CLIs will start it from ${bin}`);
-  }
+  if (bin !== "memhub") deps.io.info(`Your AI CLIs will start memhub from ${bin}`);
   for (const key of cfg.clients) {
     if (!clientByKey(key)) deps.io.info(`✗ ${key}: unknown client`);
   }
@@ -400,27 +398,45 @@ const autoIO: InitIO = {
   info(message) { console.log(message); },
 };
 
-export function installedOutsideNpx(run: (file: string, args: string[]) => string = (f, a) => execFileSync(f, a, { encoding: "utf8" })): boolean {
+export function memhubPaths(run: (file: string, args: string[]) => string = (f, a) => execFileSync(f, a, { encoding: "utf8" })): string[] {
   try {
     return run("which", ["-a", "memhub"])
-      .split("\n").map((l) => l.trim()).filter(Boolean)
-      .some((path) => !path.includes("/_npx/") && !path.includes("node_modules/.bin"));
+      .split("\n").map((l) => l.trim())
+      .filter((path) => path.startsWith("/") && !path.includes("/_npx/") && !path.includes("node_modules/.bin"));
   } catch {
-    return false;
+    return [];
   }
 }
 
+export function installedOutsideNpx(run?: (file: string, args: string[]) => string): boolean {
+  return memhubPaths(run).length > 0;
+}
+
 export function resolveMemhubCommand(
-  onPath: () => boolean = installedOutsideNpx,
+  paths: () => string[] = memhubPaths,
   globalBin: () => string = () => join(execFileSync("npm", ["prefix", "-g"], { encoding: "utf8" }).trim(), "bin", "memhub"),
   exists: (path: string) => boolean = existsSync
 ): string | null {
-  if (onPath()) return "memhub";
+  const found = paths()[0];
+  if (found) return found;
   try {
     const path = globalBin();
     return exists(path) ? path : null;
   } catch {
     return null;
+  }
+}
+
+export function installNeeded(
+  bin: string | null,
+  version: string = VERSION,
+  installedVersion: (bin: string) => string = (b) => execFileSync(b, ["--version"], { encoding: "utf8" })
+): boolean {
+  if (!bin) return true;
+  try {
+    return installedVersion(bin).trim() !== version;
+  } catch {
+    return true;
   }
 }
 
@@ -450,7 +466,7 @@ export function runInit(args: string[] = []): void {
       defaultNamespace: safeUsername(),
       local: { supported: localSupported, setup: setupLocalDb, ensure: ensureLocalDb },
       selfInstall: {
-        needed: () => resolveMemhubCommand() === null,
+        needed: () => installNeeded(resolveMemhubCommand()),
         install: () => { execFileSync("npm", ["install", "-g", `memhub@${VERSION}`], { stdio: "ignore" }); },
       },
       command: resolveMemhubCommand,

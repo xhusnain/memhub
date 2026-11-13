@@ -129,6 +129,22 @@ function claudeHooksInstalled(home: string): boolean {
   });
 }
 
+function claudeHookCommand(home: string): string | null {
+  let o: Record<string, unknown>;
+  try { o = readJsonObject(join(home, ".claude", "settings.json")); } catch { return null; }
+  const hooks = isPlainObject(o.hooks) ? o.hooks : {};
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      if (!isPlainObject(g) || !Array.isArray(g.hooks)) continue;
+      for (const h of g.hooks) {
+        if (isMemhubHook(h)) return ((h as { command: string }).command).replace(/ hook [a-z-]+$/, "").replace(/^"|"$/g, "");
+      }
+    }
+  }
+  return null;
+}
+
 function removeClaudeHooks(home: string): void {
   jsonDeleteEntry(join(home, ".claude", "settings.json"), stripMemhubHooks);
 }
@@ -144,6 +160,7 @@ export type ClientAdapter = {
   installHooks?(home: string, bin?: string): void;
   removeHooks?(home: string): void;
   hooksInstalled?(home: string): boolean;
+  registeredCommand?(home: string): string | null;
 };
 
 export const CLIENTS: ClientAdapter[] = [
@@ -167,6 +184,7 @@ export const CLIENTS: ClientAdapter[] = [
     installHooks: installClaudeHooks,
     removeHooks: removeClaudeHooks,
     hooksInstalled: claudeHooksInstalled,
+    registeredCommand: claudeHookCommand,
   },
   {
     key: "codex",

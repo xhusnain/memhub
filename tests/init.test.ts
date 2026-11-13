@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { Pool } from "pg";
-import { runInitWith, installedOutsideNpx, parseInitArgs, resolveMemhubCommand, type InitIO } from "../src/wizard/init.js";
+import { runInitWith, installedOutsideNpx, installNeeded, memhubPaths, parseInitArgs, resolveMemhubCommand, type InitIO } from "../src/wizard/init.js";
 import { VERSION } from "../src/version.js";
 import { saveConfig } from "../src/config.js";
 
@@ -339,7 +339,7 @@ describe("easy onboarding", () => {
     const bin = "/opt/node/bin/memhub";
     const { io, infos } = makeIO({ connQueue: [uri], capture: "auto", embeddings: "none", clients: ["claude", "codex", "gemini", "cursor", "opencode"] });
     await runInitWith({ io, ...deps, command: () => bin });
-    expect(infos.some((m) => m.includes(`will start it from ${bin}`))).toBe(true);
+    expect(infos.some((m) => m.includes(`will start memhub from ${bin}`))).toBe(true);
     expect(runs).toContainEqual(["claude", ["mcp", "add", "--scope", "user", "memhub", "-e", "MEMHUB_CLIENT=claude", "--", bin, "serve"]]);
     expect(runs).toContainEqual(["codex", ["mcp", "add", "memhub", "--env", "MEMHUB_CLIENT=codex", "--", bin, "serve"]]);
     expect(JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8")).mcpServers.memhub.command).toBe(bin);
@@ -397,11 +397,26 @@ describe("init helpers", () => {
     expect(installedOutsideNpx(() => { throw new Error("not found"); })).toBe(false);
   });
 
-  it("resolves the memhub command: PATH first, then npm's global folder, else nothing", () => {
-    expect(resolveMemhubCommand(() => true)).toBe("memhub");
-    expect(resolveMemhubCommand(() => false, () => "/g/bin/memhub", () => true)).toBe("/g/bin/memhub");
-    expect(resolveMemhubCommand(() => false, () => "/g/bin/memhub", () => false)).toBeNull();
-    expect(resolveMemhubCommand(() => false, () => { throw new Error("no npm"); })).toBeNull();
+  it("always resolves memhub to a full path: PATH first, then npm's global folder, else nothing", () => {
+    expect(resolveMemhubCommand(() => ["/usr/local/bin/memhub", "/other/memhub"])).toBe("/usr/local/bin/memhub");
+    expect(resolveMemhubCommand(() => [], () => "/g/bin/memhub", () => true)).toBe("/g/bin/memhub");
+    expect(resolveMemhubCommand(() => [], () => "/g/bin/memhub", () => false)).toBeNull();
+    expect(resolveMemhubCommand(() => [], () => { throw new Error("no npm"); })).toBeNull();
+  });
+
+  it("installs when memhub is missing, outdated, or too old to report a version", () => {
+    expect(installNeeded(null)).toBe(true);
+    expect(installNeeded("/g/bin/memhub", "0.4.3", () => "0.4.3\n")).toBe(false);
+    expect(installNeeded("/g/bin/memhub", "0.4.3", () => "0.4.1\n")).toBe(true);
+    expect(installNeeded("/g/bin/memhub", "0.4.3", () => "Usage: memhub <init|serve|dream|schedule>\n")).toBe(true);
+    expect(installNeeded("/g/bin/memhub", "0.4.3", () => { throw new Error("exit 1"); })).toBe(true);
+  });
+
+  it("is not fooled by the folders npx adds to PATH while it runs", () => {
+    const underNpx = () => "/Users/x/.npm/_npx/abc/node_modules/.bin/memhub\n/Users/x/.local/share/node/v24/bin/memhub\n";
+    expect(memhubPaths(underNpx)).toEqual(["/Users/x/.local/share/node/v24/bin/memhub"]);
+    expect(resolveMemhubCommand(() => memhubPaths(underNpx))).toBe("/Users/x/.local/share/node/v24/bin/memhub");
+    expect(memhubPaths(() => "memhub not found\n")).toEqual([]);
   });
 
   it("keeps the version constant in step with package.json", () => {

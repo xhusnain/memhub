@@ -32,7 +32,7 @@ function setup(over: Partial<DoctorDeps> = {}) {
     baseDir, home,
     connect: async (url) => new Pool({ connectionString: url, connectionTimeoutMillis: 1500 }),
     onPath: () => true,
-    command: () => "memhub",
+    command: () => "/usr/local/bin/memhub",
     ...over,
   };
   return { deps, baseDir, home };
@@ -85,7 +85,16 @@ describe("memhub doctor", () => {
     applyCaptureSnippet(clientByKey("claude")!.instructionsFile(home)!, "auto");
     const checks = await runChecks(deps);
     expect(checks.every((c) => c.ok)).toBe(true);
-    expect(formatChecks(checks)).toMatch(/installed at \/opt\/node\/bin\/memhub \(not on PATH/);
+    expect(formatChecks(checks)).toMatch(/installed at \/opt\/node\/bin\/memhub/);
+  });
+
+  it("catches hooks registered with a bare command that is not on PATH", async () => {
+    const { deps, baseDir, home } = setup({ onPath: (bin) => bin !== "memhub" });
+    saveConfig({ postgresUrl: container.getConnectionUri(), namespace: "doc", captureMode: "auto", embeddings: { provider: "none" }, clients: ["claude"] }, baseDir);
+    clientByKey("claude")!.installHooks!(home);
+    applyCaptureSnippet(clientByKey("claude")!.instructionsFile(home)!, "auto");
+    const text = formatChecks(await runChecks(deps));
+    expect(text).toMatch(/✗ Claude Code: registered to start "memhub", which is not on PATH\n    → memhub init/);
   });
 
   it("does not ask for hooks or a runner in manual mode, and ignores old hook errors", async () => {
