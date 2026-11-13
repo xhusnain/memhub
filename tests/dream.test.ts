@@ -5,6 +5,9 @@ import { migrate } from "../src/db/migrate.js";
 import { MemoryStore } from "../src/db/store.js";
 import { buildDreamPrompt, runDreamWith, maybeAutoDream, makeRunner } from "../src/dream.js";
 import type { Config } from "../src/config.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let container: StartedPostgreSqlContainer;
 let pool: Pool;
@@ -54,7 +57,41 @@ describe("buildDreamPrompt", () => {
   });
 });
 
+describe("buildDreamPrompt batching and consolidation", () => {
+  it("works outward from what is new after the first dream", () => {
+    const first = buildDreamPrompt();
+    expect(first).toMatch(/first dream/i);
+    const later = buildDreamPrompt([], { since: "2026-11-01 03:00:00+00", faded: 3 });
+    expect(later).toMatch(/list\(\{ since: "2026-11-01 03:00:00\+00" \}\)/);
+    expect(later).toMatch(/Never page through the whole memory/);
+    expect(later).toMatch(/3 long-unused, low-salience memories just faded/);
+    expect(first).not.toMatch(/just faded/);
+  });
+
+  it("consolidates into a gist without destroying details, and links instead of merging", () => {
+    const p = buildDreamPrompt();
+    expect(p).toMatch(/CONSOLIDATION/);
+    expect(p).toMatch(/do NOT forget, supersede, or rewrite them/);
+    expect(p).toMatch(/ASSOCIATION/);
+    expect(p).toMatch(/never supersede merely because one is newer/);
+  });
+});
+
 describe("makeRunner", () => {
+  it("marks child processes as dreaming so their hooks stay quiet", () => {
+    const runner = makeRunner(["node", "-e", "if (process.env.MEMHUB_DREAMING !== '1') process.exit(1)"]);
+    expect(() => runner("x")).not.toThrow();
+  });
+
+  it("passes the session's project to the child and runs it in the memhub folder, not the caller's", () => {
+    const base = mkdtempSync(join(tmpdir(), "mh-base-"));
+    const ok = "const fs=require('fs');const [want, dir] = process.argv.slice(1);if ((process.env.MEMHUB_PROJECT ?? 'unset') !== want || fs.realpathSync(process.cwd()) !== fs.realpathSync(dir)) process.exit(1)";
+    expect(() => makeRunner(["node", "-e", ok, "alpha", base], base)("p", { project: "alpha" })).not.toThrow();
+    expect(() => makeRunner(["node", "-e", ok, "", base], base)("p")).not.toThrow();
+    expect(() => makeRunner(["node", "-e", ok, "beta", base], base)("p", { project: "alpha" })).toThrow();
+  });
+
+
   it("appends the prompt as the final argument of a custom dream command", () => {
     const runner = makeRunner(["node", "-e", "if (process.argv[1] !== 'dream prompt') process.exit(1)"]);
     expect(() => runner("dream prompt")).not.toThrow();
@@ -107,6 +144,26 @@ describe("runDreamWith", () => {
     expect(claudePrompt).toMatch(/deduction/i);
     const { rows } = await pool.query("select 1 from memhub_meta where key = $1", [`last_dream:${ns}`]);
     expect(rows.length).toBe(1);
+  });
+
+  it("fades long-unused memories first and hands the agent the last dream time", async () => {
+    const ns = "dreamer-fade";
+    const store = new MemoryStore(pool, ns);
+    const { memory: dull } = await store.remember({ content: "ancient trivia about lichens", salience: 0.2 });
+    await pool.query(
+      "update memories set created_at = now() - interval '400 days', last_confirmed_at = now() - interval '400 days' where id = $1",
+      [dull.id]
+    );
+    await store.markDreamed();
+    let prompt = "";
+    await runDreamWith({
+      loadCfg: () => cfgFor(ns),
+      connect: async (url) => new Pool({ connectionString: url }),
+      runClaude: (p) => { prompt = p; },
+    });
+    expect(prompt).toMatch(/1 long-unused, low-salience memories just faded/);
+    expect(prompt).toMatch(/list\(\{ since: "/);
+    expect((await store.list({ status: "faded" })).map((m) => m.id)).toEqual([dull.id]);
   });
 
   it("does not fail the run when the claude semantic pass throws, and does not mark the dream done", async () => {

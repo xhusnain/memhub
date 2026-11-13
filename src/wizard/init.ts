@@ -8,6 +8,9 @@ import { migrateEmbeddings } from "../db/migrate-embeddings.js";
 import { CLIENTS, clientByKey, detectClients, registerClient, unregisterClient, type Run, type Which } from "../clients.js";
 import { applyCaptureSnippet } from "./capture-snippet.js";
 import { redactUrl, redactErr } from "../redact.js";
+import { ensureLocalDb, localSupported, setupLocalDb, type LocalSetup } from "../localdb.js";
+import { VERSION } from "../version.js";
+import { execFileSync } from "node:child_process";
 
 export interface InitIO {
   text(opts: { message: string; placeholder?: string; defaultValue?: string }): Promise<string>;
@@ -27,6 +30,13 @@ type Deps = {
   run?: Run;
   which?: Which;
   defaultNamespace?: string;
+  local?: {
+    supported(): boolean;
+    setup(baseDir: string): Promise<LocalSetup>;
+    ensure(cfg: Pick<Config, "localDb">): Promise<void>;
+  };
+  selfInstall?: { needed(): boolean; install(): void };
+  options?: { yes?: boolean; url?: string };
 };
 
 type ConnInfo = { pool: Pool; hasVector: boolean };
@@ -54,8 +64,15 @@ async function connectAndValidate(connect: (url: string) => Promise<Pool>, url: 
 async function getValidatedConnection(
   io: InitIO,
   connect: (url: string) => Promise<Pool>,
-  opts: { savedUrl?: string; trySavedSilently?: boolean }
+  opts: { savedUrl?: string; trySavedSilently?: boolean; fixedUrl?: string; interactive?: boolean }
 ): Promise<Conn> {
+  if (opts.fixedUrl || opts.interactive === false) {
+    const url = (opts.fixedUrl ?? opts.savedUrl ?? "").trim();
+    if (!url) throw new Error("No database to connect to. Pass --url <postgres-url>, or run memhub init without --yes.");
+    const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, url));
+    io.info(connectedMsg(info.hasVector));
+    return { pool: info.pool, hasVector: info.hasVector, url };
+  }
   if (opts.savedUrl && opts.trySavedSilently) {
     try {
       const info = await io.step("Connecting to Postgres", () => connectAndValidate(connect, opts.savedUrl!));
@@ -152,6 +169,21 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     await pool.end().catch(() => {});
   }
   saveConfig(cfg, deps.configDir);
+  if (deps.selfInstall?.needed()) {
+    const ok = await deps.io.confirm({
+      message: `Install memhub on this machine so your AI CLIs can start it? (npm install -g memhub@${VERSION})`,
+      initialValue: true,
+    });
+    if (ok) {
+      try {
+        await deps.io.step("Installing memhub", async () => deps.selfInstall!.install());
+      } catch (e) {
+        deps.io.info(`✗ Install failed: ${redactErr(e)} — run it yourself: npm install -g memhub`);
+      }
+    } else {
+      deps.io.info("⚠ Skipped. Your AI CLIs need the memhub command on PATH — run: npm install -g memhub");
+    }
+  }
   for (const key of cfg.clients) {
     if (!clientByKey(key)) deps.io.info(`✗ ${key}: unknown client`);
   }
@@ -160,6 +192,7 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     const instructions = adapter.instructionsFile(deps.home);
     if (!chosen.has(adapter.key)) {
       try { unregisterClient(adapter.key, deps.home, deps.run); } catch {}
+      try { adapter.removeHooks?.(deps.home); } catch {}
       if (instructions) {
         try { applyCaptureSnippet(instructions, "manual"); } catch {}
       }
@@ -173,6 +206,18 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
     } catch (e) {
       deps.io.info(`✗ ${adapter.title}: ${redactErr(e)}`);
     }
+    if (adapter.installHooks && adapter.removeHooks) {
+      try {
+        if (registered && cfg.captureMode === "auto") {
+          adapter.installHooks(deps.home);
+          deps.io.info(`✓ ${adapter.title} hooks installed (automatic recall and after-session reflection)`);
+        } else {
+          adapter.removeHooks(deps.home);
+        }
+      } catch (e) {
+        deps.io.info(`✗ ${adapter.title} hooks: ${redactErr(e)}`);
+      }
+    }
     if (instructions && (registered || cfg.captureMode === "manual")) {
       try {
         applyCaptureSnippet(instructions, cfg.captureMode);
@@ -183,12 +228,48 @@ async function finalize(deps: Deps, pool: Pool, cfg: Config): Promise<void> {
   }
 }
 
+async function chooseDatabase(
+  deps: Deps, existing: Config | undefined, quick: boolean
+): Promise<{ conn: Conn; localDb?: Config["localDb"] }> {
+  const interactive = deps.options?.yes !== true;
+  if (deps.options?.url) {
+    return { conn: await getValidatedConnection(deps.io, deps.connect, { fixedUrl: deps.options.url }) };
+  }
+  const local = deps.local?.supported() ? deps.local : undefined;
+  let where = "url";
+  if (local) {
+    where = quick ? "local" : await deps.io.select({
+      message: "Where should memory be stored?",
+      initialValue: existing && !existing.localDb ? "url" : "local",
+      options: [
+        { value: "local", label: "On this machine", hint: "nothing to set up — memhub runs its own small Postgres" },
+        { value: "url", label: "My own Postgres", hint: "Supabase / Neon / self-hosted — shares one memory across machines" },
+      ],
+    });
+  }
+  if (where === "local" && local) {
+    try {
+      const setup = await deps.io.step(
+        "Preparing the local database (the first run downloads Postgres, about 130 MB)",
+        () => local.setup(deps.configDir)
+      );
+      const info = await connectAndValidate(deps.connect, setup.postgresUrl);
+      deps.io.info("✓ Local database ready");
+      return { conn: { pool: info.pool, hasVector: info.hasVector, url: setup.postgresUrl }, localDb: setup.localDb };
+    } catch (e) {
+      deps.io.info(`✗ The local database could not be set up: ${redactErr(e)} — use a Postgres URL instead`);
+    }
+  }
+  const savedUrl = existing && !existing.localDb ? existing.postgresUrl : undefined;
+  return { conn: await getValidatedConnection(deps.io, deps.connect, { savedUrl, interactive }) };
+}
+
 export async function runInitWith(deps: Deps): Promise<void> {
   const existing = tryLoadConfig(deps.configDir);
 
-  if (existing) {
+  if (existing && !deps.options?.url) {
     const action = await deps.io.select({
-      message: `Found existing config (namespace "${existing.namespace}", embeddings: ${existing.embeddings.provider}).`,
+      message: `Found existing config (namespace "${existing.namespace}", ${existing.localDb ? "local database" : "your own Postgres"}, embeddings: ${existing.embeddings.provider}).`,
       initialValue: "keep",
       options: [
         { value: "keep", label: "Keep & re-apply", hint: "re-run setup with saved settings (use after an update)" },
@@ -196,31 +277,57 @@ export async function runInitWith(deps: Deps): Promise<void> {
       ],
     });
     if (action === "keep") {
-      const conn = await getValidatedConnection(deps.io, deps.connect, { savedUrl: existing.postgresUrl, trySavedSilently: true });
-      await finalize(deps, conn.pool, { ...existing, postgresUrl: conn.url });
+      if (existing.localDb && deps.local) {
+        try {
+          await deps.io.step("Starting the local database", () => deps.local!.ensure(existing));
+        } catch (e) {
+          deps.io.info(`✗ ${redactErr(e)}`);
+        }
+      }
+      const conn = await getValidatedConnection(deps.io, deps.connect, {
+        savedUrl: existing.postgresUrl, trySavedSilently: true, interactive: deps.options?.yes !== true,
+      });
+      const localDb = conn.url === existing.postgresUrl ? existing.localDb : undefined;
+      await finalize(deps, conn.pool, { ...existing, postgresUrl: conn.url, localDb });
       return;
     }
-    await runWizard(deps, existing);
-    return;
   }
-  await runWizard(deps, undefined);
+  await runWizard(deps, existing);
 }
 
 async function runWizard(deps: Deps, existing: Config | undefined): Promise<void> {
-  const conn = await getValidatedConnection(deps.io, deps.connect, { savedUrl: existing?.postgresUrl });
+  const quick = !existing && (await deps.io.select({
+    message: "Setup",
+    initialValue: "quick",
+    options: [
+      { value: "quick", label: "Quick", hint: "recommended — sensible defaults, no more questions" },
+      { value: "custom", label: "Custom", hint: "choose the database, namespace, capture mode, embeddings, and CLIs" },
+    ],
+  })) === "quick";
+  const { conn, localDb } = await chooseDatabase(deps, existing, quick);
+  if (quick) {
+    const detected = detectClients(deps.home, deps.which);
+    const clients = [...new Set(["claude", ...detected])].filter((k) => clientByKey(k));
+    const namespace = deps.defaultNamespace || "default";
+    deps.io.info(`Using namespace "${namespace}", automatic capture, full-text search, and: ${clients.map((k) => clientByKey(k)!.title).join(", ")}. Re-run memhub init to change any of this.`);
+    await finalize(deps, conn.pool, {
+      postgresUrl: conn.url, namespace, captureMode: "auto", embeddings: { provider: "none" }, clients, localDb,
+    });
+    return;
+  }
   const nsAnswer = (await deps.io.text({ message: "Namespace (shared across machines)", defaultValue: existing?.namespace ?? deps.defaultNamespace })).trim();
   const namespace = nsAnswer || existing?.namespace || deps.defaultNamespace || "default";
   const captureMode = (await deps.io.select({
     message: "Capture mode",
     initialValue: existing?.captureMode ?? "auto",
     options: [
-      { value: "auto", label: "Auto", hint: "Claude saves silently as you work (recommended)" },
+      { value: "auto", label: "Auto", hint: "memory is recalled and updated on its own, no asking (recommended)" },
       { value: "manual", label: "Manual", hint: "save only when you ask" },
     ],
   })) as "auto" | "manual";
   const embeddings = await promptEmbeddings(deps.io, conn.hasVector, existing?.embeddings);
   const clients = await promptClients(deps, existing);
-  await finalize(deps, conn.pool, { postgresUrl: conn.url, namespace, captureMode, embeddings, clients, dreamCommand: existing?.dreamCommand });
+  await finalize(deps, conn.pool, { postgresUrl: conn.url, namespace, captureMode, embeddings, clients, dreamCommand: existing?.dreamCommand, localDb });
 }
 
 function safeUsername(): string | undefined {
@@ -267,19 +374,69 @@ const realIO: InitIO = {
   info(message) { p.log.info(message); },
 };
 
-export function runInit(): void {
+const autoIO: InitIO = {
+  async text(opts) { return opts.defaultValue ?? ""; },
+  async select(opts) { return opts.initialValue ?? opts.options[0].value; },
+  async multiselect(opts) { return opts.initialValues ?? []; },
+  async password() { return ""; },
+  async confirm(opts) { return opts.initialValue ?? true; },
+  async step(message, fn) {
+    try { const r = await fn(); console.log(`✓ ${message}`); return r; }
+    catch (e) { console.log(`✗ ${message}`); throw e; }
+  },
+  info(message) { console.log(message); },
+};
+
+export function installedOutsideNpx(run: (file: string, args: string[]) => string = (f, a) => execFileSync(f, a, { encoding: "utf8" })): boolean {
+  try {
+    return run("which", ["-a", "memhub"])
+      .split("\n").map((l) => l.trim()).filter(Boolean)
+      .some((path) => !path.includes("/_npx/") && !path.includes("node_modules/.bin"));
+  } catch {
+    return false;
+  }
+}
+
+export function parseInitArgs(args: string[]): { yes: boolean; url?: string } {
+  const i = args.indexOf("--url");
+  return { yes: args.includes("--yes") || args.includes("-y"), url: i >= 0 ? args[i + 1] : undefined };
+}
+
+const NEXT_STEPS = [
+  "Restart your AI CLIs so they pick up memhub.",
+  "Work as usual. Memory fills in on its own after each session — you never have to say \"remember this\".",
+  "memhub doctor checks the setup · memhub stats shows what is stored · memhub init changes settings.",
+];
+
+export function runInit(args: string[] = []): void {
+  const options = parseInitArgs(args);
   (async () => {
-    p.intro("memhub init");
+    if (!options.yes) {
+      p.intro("memhub — a personal memory for your AI CLIs");
+      p.note("This sets up a database for your memory, connects your AI CLIs to it,\nand turns on automatic recall and learning. It takes about a minute.", "What happens");
+    }
     await runInitWith({
-      io: realIO,
+      io: options.yes ? autoIO : realIO,
       connect: async (url) => new Pool({ connectionString: url }),
       configDir: join(homedir(), ".memhub"),
       home: homedir(),
       defaultNamespace: safeUsername(),
+      local: { supported: localSupported, setup: setupLocalDb, ensure: ensureLocalDb },
+      selfInstall: {
+        needed: () => !installedOutsideNpx(),
+        install: () => { execFileSync("npm", ["install", "-g", `memhub@${VERSION}`], { stdio: "ignore" }); },
+      },
+      options,
     });
-    p.outro("Done. Restart your AI CLIs — the memory tools are available everywhere.");
+    if (options.yes) console.log("\nDone.\n" + NEXT_STEPS.map((l, i) => `  ${i + 1}. ${l}`).join("\n"));
+    else {
+      p.note(NEXT_STEPS.map((l, i) => `${i + 1}. ${l}`).join("\n"), "Next");
+      p.outro("Done.");
+    }
   })().catch((err) => {
-    p.cancel(`Error: ${redactUrl(err instanceof Error ? err.message : String(err))}`);
+    const msg = `Error: ${redactUrl(err instanceof Error ? err.message : String(err))}`;
+    if (options.yes) console.error(msg);
+    else p.cancel(msg);
     process.exit(1);
   });
 }

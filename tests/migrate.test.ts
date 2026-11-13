@@ -48,7 +48,7 @@ describe("migrate", () => {
     const meta = await pool.query("select to_regclass('public.memhub_meta') as t");
     expect(meta.rows[0].t).toBe("memhub_meta");
     const version = await pool.query("select value from memhub_meta where key='schema_version'");
-    expect(version.rows[0].value).toBe("2");
+    expect(version.rows[0].value).toBe("3");
   });
 
   it("upgrades a v1 database: hashes content, archives duplicates, enforces uniqueness", async () => {

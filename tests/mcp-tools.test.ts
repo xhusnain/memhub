@@ -61,7 +61,7 @@ describe("tool handlers", () => {
     await h.remember({ content: "Deploy the frontend to Vercel for production hosting" });
     const second = await h.remember({ content: "We deploy the frontend to Vercel" });
     expect(second).toMatch(/similar existing memories/i);
-    expect(second).toMatch(/supersede or confirm/i);
+    expect(second).toMatch(/confirm it[\s\S]*supersede it[\s\S]*link them/i);
   });
 
   it("context assembles peer-card, key, and recent sections", async () => {

@@ -182,3 +182,51 @@ describe("instructions files", () => {
     expect(clientByKey("cursor")!.instructionsFile(h)).toBeNull();
   });
 });
+
+describe("claude hooks", () => {
+  const settings = (h: string) => JSON.parse(readFileSync(join(h, ".claude", "settings.json"), "utf8"));
+  const claude = clientByKey("claude")!;
+
+  it("installs the four memory hooks and is idempotent", () => {
+    const h = home();
+    claude.installHooks!(h);
+    claude.installHooks!(h);
+    const hooks = settings(h).hooks;
+    expect(Object.keys(hooks).sort()).toEqual(["PreCompact", "SessionEnd", "SessionStart", "UserPromptSubmit"]);
+    expect(hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: "memhub hook prompt", timeout: 10 }] }]);
+    expect(hooks.SessionStart[0].hooks[0].command).toBe("memhub hook session-start");
+    expect(hooks.SessionEnd[0].hooks[0].command).toBe("memhub hook session-end");
+    expect(hooks.PreCompact[0].hooks[0].command).toBe("memhub hook pre-compact");
+  });
+
+  it("preserves the user's own hooks and settings on install and removal", () => {
+    const h = home();
+    mkdirSync(join(h, ".claude"), { recursive: true });
+    const mine = { matcher: "Bash", hooks: [{ type: "command", command: "echo mine" }] };
+    writeFileSync(join(h, ".claude", "settings.json"), JSON.stringify({
+      model: "opus",
+      hooks: { PreToolUse: [mine], SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }] },
+    }));
+    claude.installHooks!(h);
+    let s = settings(h);
+    expect(s.model).toBe("opus");
+    expect(s.hooks.PreToolUse).toEqual([mine]);
+    expect(s.hooks.SessionStart).toHaveLength(2);
+    claude.removeHooks!(h);
+    s = settings(h);
+    expect(s.hooks).toEqual({ PreToolUse: [mine], SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }] });
+  });
+
+  it("removal leaves no empty hooks object and tolerates a missing file", () => {
+    const h = home();
+    claude.removeHooks!(h);
+    claude.installHooks!(h);
+    claude.removeHooks!(h);
+    expect(settings(h).hooks).toBeUndefined();
+  });
+
+  it("only claude has hook installation for now", () => {
+    expect(clientByKey("codex")!.installHooks).toBeUndefined();
+    expect(clientByKey("gemini")!.installHooks).toBeUndefined();
+  });
+});

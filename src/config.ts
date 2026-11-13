@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -17,6 +17,7 @@ const ConfigSchema = z.object({
   embeddings: EmbeddingsSchema,
   clients: z.array(z.string()).default(["claude"]),
   dreamCommand: z.array(z.string().min(1)).min(1).optional(),
+  localDb: z.object({ port: z.number().int().positive(), dataDir: z.string().min(1), binDir: z.string().min(1) }).optional(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 export type ConfigInput = z.input<typeof ConfigSchema>;
@@ -28,7 +29,8 @@ export function configPath(baseDir = join(homedir(), ".memhub")): string {
 export function saveConfig(c: ConfigInput, baseDir?: string): void {
   const p = configPath(baseDir);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(ConfigSchema.parse(c), null, 2));
+  writeFileSync(p, JSON.stringify(ConfigSchema.parse(c), null, 2), { mode: 0o600 });
+  try { chmodSync(p, 0o600); } catch {}
 }
 
 export function loadConfig(baseDir?: string): Config {

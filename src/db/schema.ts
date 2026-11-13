@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = "2";
+export const SCHEMA_VERSION = "3";
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memories (
@@ -37,6 +37,22 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_accessed_at timestamptz;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS fts_simple tsvector
   GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;
 CREATE INDEX IF NOT EXISTS memories_fts_simple_idx ON memories USING gin (fts_simple);
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'global';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS strength real NOT NULL DEFAULT 1;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS supersede_reason text;
+CREATE INDEX IF NOT EXISTS memories_scope_idx ON memories (namespace, scope, status);
+CREATE INDEX IF NOT EXISTS memories_superseded_by_idx ON memories (superseded_by) WHERE superseded_by IS NOT NULL;
+CREATE TABLE IF NOT EXISTS memory_links (
+  src        uuid NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  dst        uuid NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relation   text NOT NULL DEFAULT 'related',
+  weight     real NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (src, dst, relation),
+  CHECK (src <> dst)
+);
+CREATE INDEX IF NOT EXISTS memory_links_dst_idx ON memory_links (dst);
 `;
 
 export const BACKFILL_SQL = `

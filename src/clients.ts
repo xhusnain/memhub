@@ -71,6 +71,63 @@ function jsonDeleteEntry(path: string, del: (obj: Record<string, unknown>) => vo
   writeJson(path, obj);
 }
 
+const HOOK_PREFIX = "memhub hook ";
+const CLAUDE_HOOKS: [string, string][] = [
+  ["SessionStart", "session-start"],
+  ["UserPromptSubmit", "prompt"],
+  ["PreCompact", "pre-compact"],
+  ["SessionEnd", "session-end"],
+];
+
+function isMemhubHook(h: unknown): boolean {
+  return isPlainObject(h) && typeof h.command === "string" && h.command.startsWith(HOOK_PREFIX);
+}
+
+function stripMemhubHooks(o: Record<string, unknown>): void {
+  if (!isPlainObject(o.hooks)) return;
+  const hooks = o.hooks;
+  for (const event of Object.keys(hooks)) {
+    const groups = hooks[event];
+    if (!Array.isArray(groups)) continue;
+    const kept = groups
+      .map((g) => (isPlainObject(g) && Array.isArray(g.hooks) ? { ...g, hooks: g.hooks.filter((h) => !isMemhubHook(h)) } : g))
+      .filter((g) => !(isPlainObject(g) && Array.isArray(g.hooks) && g.hooks.length === 0));
+    if (kept.length) hooks[event] = kept;
+    else delete hooks[event];
+  }
+  if (!Object.keys(hooks).length) delete o.hooks;
+}
+
+function installClaudeHooks(home: string): void {
+  const path = join(home, ".claude", "settings.json");
+  jsonMergeFile(path, (o) => {
+    stripMemhubHooks(o);
+    const hooks = objAt(o, "hooks", path);
+    for (const [event, arg] of CLAUDE_HOOKS) {
+      const groups = Array.isArray(hooks[event]) ? [...(hooks[event] as unknown[])] : [];
+      groups.push({ hooks: [{ type: "command", command: HOOK_PREFIX + arg, timeout: 10 }] });
+      hooks[event] = groups;
+    }
+    o.hooks = hooks;
+  });
+}
+
+function claudeHooksInstalled(home: string): boolean {
+  let o: Record<string, unknown>;
+  try { o = readJsonObject(join(home, ".claude", "settings.json")); } catch { return false; }
+  const hooks = isPlainObject(o.hooks) ? o.hooks : {};
+  return CLAUDE_HOOKS.every(([event, arg]) => {
+    const groups = hooks[event];
+    return Array.isArray(groups) && groups.some((g) =>
+      isPlainObject(g) && Array.isArray(g.hooks) &&
+      g.hooks.some((h) => isPlainObject(h) && h.command === HOOK_PREFIX + arg));
+  });
+}
+
+function removeClaudeHooks(home: string): void {
+  jsonDeleteEntry(join(home, ".claude", "settings.json"), stripMemhubHooks);
+}
+
 export type ClientAdapter = {
   key: ClientKey;
   title: string;
@@ -79,6 +136,9 @@ export type ClientAdapter = {
   instructionsFile(home: string): string | null;
   register(home: string, run: Run): void;
   unregister(home: string, run: Run): void;
+  installHooks?(home: string): void;
+  removeHooks?(home: string): void;
+  hooksInstalled?(home: string): boolean;
 };
 
 export const CLIENTS: ClientAdapter[] = [
@@ -99,6 +159,9 @@ export const CLIENTS: ClientAdapter[] = [
         run("claude", ["mcp", "remove", "--scope", "user", "memhub"]);
       } catch {}
     },
+    installHooks: installClaudeHooks,
+    removeHooks: removeClaudeHooks,
+    hooksInstalled: claudeHooksInstalled,
   },
   {
     key: "codex",

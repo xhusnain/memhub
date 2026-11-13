@@ -1,39 +1,54 @@
 import { execFileSync, spawn } from "node:child_process";
-import { Pool } from "pg";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { Pool } from "pg";
 import { loadConfig, type Config } from "./config.js";
 import { redactErr } from "./redact.js";
 import { migrate } from "./db/migrate.js";
 import { MemoryStore } from "./db/store.js";
+import { openPool } from "./localdb.js";
 
 const NEAR_DUP_DISTANCE = 0.15;
 
-export function buildDreamPrompt(nearDuplicates: string[] = []): string {
+export function buildDreamPrompt(nearDuplicates: string[] = [], opts: { since?: string | null; faded?: number } = {}): string {
   const lines = [
-    "You are running an unattended \"dream\" — a higher-order reasoning pass over the user's long-term memory, modeled on Honcho's dreamer. Use the memhub MCP tools (recall, list, remember, supersede, forget, confirm). Work in phases and be conservative.",
+    "You are running an unattended \"dream\" — the sleep-time consolidation pass over the user's long-term memory, modeled on Honcho's dreamer. Use the memhub MCP tools (recall, list, remember, supersede, link, forget, confirm, history). Work in phases and be conservative.",
     "",
-    "PHASE 0 — DISCOVERY: call `recall` and `list` to load what is already known. Understand the landscape before writing anything. Do not duplicate facts that already exist (recall first).",
+    opts.since
+      ? `PHASE 0 — DISCOVERY: the last dream ran at ${opts.since}. Load only what is new with \`list({ since: "${opts.since}" })\` (page with \`offset\` if it says more exist). For each new fact, \`recall\` its topic to bring up the older memories it touches. Never page through the whole memory — work outward from what is new.`
+      : "PHASE 0 — DISCOVERY: this is the first dream. Page through memory with `list` (100 per page, use `offset`) and `recall` topics that look related. Understand the landscape before writing anything.",
+    "Do not duplicate facts that already exist (recall first).",
     "",
     "PHASE 1 — DEDUCTION (logical implications):",
-    "- Knowledge updates (HIGHEST priority): if a fact's value changed over time (e.g. \"deploys to Netlify\" then later \"deploys to Vercel\"), call `supersede` to replace the stale fact with the corrected one.",
-    "- Logical implications: derive facts that necessarily follow (e.g. \"writes the Rust scanner\" implies \"is proficient in Rust\"). Save each with `remember({ content, level: \"deductive\", source: \"derived from: <source memory ids>\" })`.",
+    "- Knowledge updates (HIGHEST priority): if a fact's value changed over time (e.g. \"deploys to Netlify\" then later \"deploys to Vercel\"), call `supersede` on the stale fact with the corrected one and a short `reason`.",
+    "- Logical implications: derive facts that necessarily follow (e.g. \"writes the Rust scanner\" implies \"is proficient in Rust\"). Save each with `remember({ content, level: \"deductive\", source: \"derived from: <source memory ids>\", links: [<source memory ids>] })`.",
     "- Contradictions: if two facts cannot both be true, reconcile them — `supersede` the wrong/older one, or record a deductive note describing the conflict.",
+    "- Promotion: a tentative memory (confidence below 0.5) that a second independent memory supports should be `confirm`ed so it becomes trusted.",
     "",
     "PHASE 2 — INDUCTION (patterns): find behavioral patterns, preferences, and tendencies that span MULTIPLE facts.",
     "- Require at least 2 supporting facts. Never restate a single fact.",
-    "- Save with `remember({ content, level: \"inductive\", tags: [\"pattern:<preference|behavior|personality|tendency>\"], confidence: <2 sources=0.5, 3-4=0.7, 5+=0.9>, source: \"derived from: <source memory ids>\" })`.",
+    "- Save with `remember({ content, level: \"inductive\", tags: [\"pattern:<preference|behavior|personality|tendency>\"], confidence: <2 sources=0.5, 3-4=0.7, 5+=0.9>, source: \"derived from: <source memory ids>\", links: [<source memory ids>] })`.",
     "",
-    "PHASE 3 — PEER CARD (stable identity): maintain ONE compact identity summary as a memory with kind \"peer-card\". Include only STABLE facts (unlikely to change within ~6 months), as short lines each prefixed with IDENTITY:, ATTRIBUTE:, RELATIONSHIP:, or INSTRUCTION:, deduplicated, at most ~40 lines. If a kind \"peer-card\" memory already exists, `supersede` it with the updated version; otherwise `remember` it.",
+    "PHASE 3 — CONSOLIDATION (gist over detail): when 4 or more active facts cover one narrow topic (e.g. the user's video style), write ONE gist memory that states the general rule, with `salience` at least as high as the highest detail, and pass the detail ids in `links` (then `link` with relation \"summarizes\" where useful). Leave the details in place — do NOT forget, supersede, or rewrite them. Unused details fade on their own; the gist and its links keep them reachable.",
+    "",
+    "PHASE 4 — ASSOCIATION: `link` memories that are both true and belong together but are not yet connected (same topic, cause and effect, a rule and its example or exception). Recall follows links one step, so link only what should surface together.",
+    "",
+    "PHASE 5 — PEER CARD (stable identity): maintain ONE compact identity summary as a memory with kind \"peer-card\". Include only STABLE facts (unlikely to change within ~6 months), as short lines each prefixed with IDENTITY:, ATTRIBUTE:, RELATIONSHIP:, or INSTRUCTION:, deduplicated, at most ~40 lines. INSTRUCTION: lines carry the user's standing working rules. If a kind \"peer-card\" memory already exists, `supersede` it with the updated version; otherwise `remember` it.",
     "",
     "RULES:",
     "- Ground everything in EXISTING memories — always put the source memory ids in `source`. Do not invent unsupported facts.",
     "- Quality over quantity; be conservative. When unsure, do nothing.",
     "- Always set the correct `level` so derived facts are distinguishable from user-stated (explicit) facts.",
     "- When two facts state the same thing, keep the one with MORE information and supersede the weaker.",
-    "- If two facts could both be true (different aspects, different times, or a preference vs an event), KEEP BOTH — never merge on suspicion.",
+    "- If two facts could both be true (different aspects, different times, different projects, or a preference vs an event), KEEP BOTH and `link` them — never merge on suspicion, and never supersede merely because one is newer.",
     "- Never store meta-facts about a conversation ('user shared a file'); store the content itself.",
     "- Rewrite relative time ('yesterday', 'last week') into absolute dates using the memory's created/confirmed dates.",
     "- Memory ids may be used in their 8-character short form.",
   ];
+  if (opts.faded) {
+    lines.push("", `NOTE: ${opts.faded} long-unused, low-salience memories just faded out of active recall. They are not deleted; \`recall\` with deep: true still finds and revives them.`);
+  }
   if (nearDuplicates.length) {
     lines.push(
       "",
@@ -44,32 +59,33 @@ export function buildDreamPrompt(nearDuplicates: string[] = []): string {
   return lines.join("\n");
 }
 
-export type ClaudeRunner = (prompt: string) => void;
+export type RunOptions = { project?: string | null };
+export type ClaudeRunner = (prompt: string, opts?: RunOptions) => void;
 
-const defaultRunClaude: ClaudeRunner = (prompt) => {
-  execFileSync(
-    "claude",
-    [
-      "-p", prompt,
-      "--allowedTools",
-      "mcp__memhub__recall", "mcp__memhub__list", "mcp__memhub__remember",
-      "mcp__memhub__supersede", "mcp__memhub__forget", "mcp__memhub__confirm",
-      "mcp__memhub__review", "mcp__memhub__history", "mcp__memhub__context",
-    ],
-    { stdio: "inherit" }
-  );
-};
+const MEMHUB_TOOLS = [
+  "recall", "list", "remember", "supersede", "forget", "confirm", "review", "history", "context", "link",
+].map((t) => "mcp__memhub__" + t);
 
-export function makeRunner(dreamCommand?: string[]): ClaudeRunner {
-  if (dreamCommand?.length) {
-    return (prompt) => {
-      execFileSync(dreamCommand[0], [...dreamCommand.slice(1), prompt], { stdio: "inherit" });
-    };
-  }
-  return defaultRunClaude;
+function childOptions(opts: RunOptions | undefined, baseDir: string) {
+  return {
+    stdio: "inherit" as const,
+    cwd: existsSync(baseDir) ? baseDir : undefined,
+    env: { ...process.env, MEMHUB_DREAMING: "1", MEMHUB_PROJECT: opts?.project ?? "" },
+  };
 }
 
-async function nearDuplicateLines(pool: Pool, namespace: string): Promise<string[]> {
+export function makeRunner(dreamCommand?: string[], baseDir = join(homedir(), ".memhub")): ClaudeRunner {
+  if (dreamCommand?.length) {
+    return (prompt, opts) => {
+      execFileSync(dreamCommand[0], [...dreamCommand.slice(1), prompt], childOptions(opts, baseDir));
+    };
+  }
+  return (prompt, opts) => {
+    execFileSync("claude", ["-p", prompt, "--allowedTools", ...MEMHUB_TOOLS], childOptions(opts, baseDir));
+  };
+}
+
+async function nearDuplicateLines(pool: Pool, namespace: string, since: string | null): Promise<string[]> {
   try {
     const { rows } = await pool.query(
       `select substr(a.id::text, 1, 8) as ia, a.content as ca,
@@ -77,15 +93,17 @@ async function nearDuplicateLines(pool: Pool, namespace: string): Promise<string
               round((ea.embedding <=> eb.embedding)::numeric, 3) as d
        from memories a
        join memory_embeddings ea on ea.memory_id = a.id
-       join memories b on b.namespace = a.namespace and b.status = 'active' and b.id > a.id
+       join memories b on b.namespace = a.namespace and b.status = 'active' and b.id <> a.id
          and (b.expires_at is null or b.expires_at > now())
+         and (b.id > a.id or ($2::timestamptz is not null and b.created_at <= $2::timestamptz))
        join memory_embeddings eb on eb.memory_id = b.id
          and eb.provider = ea.provider and eb.model = ea.model and eb.dim = ea.dim
        where a.namespace = $1 and a.status = 'active'
          and (a.expires_at is null or a.expires_at > now())
+         and ($2::timestamptz is null or a.created_at > $2::timestamptz)
          and (ea.embedding <=> eb.embedding) < ${NEAR_DUP_DISTANCE}
        order by 5 asc limit 20`,
-      [namespace]
+      [namespace, since]
     );
     return rows.map((r) => `[${r.ia}] ${r.ca}  <->  [${r.ib}] ${r.cb}  (distance ${r.d})`);
   } catch {
@@ -111,11 +129,14 @@ export async function runDreamWith(deps: {
       }
       await migrate(pool);
       const store = new MemoryStore(pool, cfg.namespace);
-      const candidates = await nearDuplicateLines(pool, cfg.namespace);
+      const since = await store.lastDreamAt().catch(() => null);
+      const faded = await store.fade().catch(() => 0);
+      if (faded) deps.log?.(`Faded ${faded} long-unused memories.`);
+      const candidates = await nearDuplicateLines(pool, cfg.namespace, since);
       const run = deps.runClaude ?? makeRunner(cfg.dreamCommand);
       let reasoned = true;
       try {
-        run(buildDreamPrompt(candidates));
+        run(buildDreamPrompt(candidates, { since, faded }));
       } catch (e) {
         reasoned = false;
         deps.log?.(`Semantic pass skipped (claude unavailable): ${redactErr(e)}`);
@@ -135,7 +156,7 @@ export async function runDreamWith(deps: {
 export function runDream(): void {
   runDreamWith({
     loadCfg: () => loadConfig(),
-    connect: async (url) => new Pool({ connectionString: url }),
+    connect: (url) => openPool(url),
     log: (m) => console.log(m),
   }).catch((err) => {
     console.error(`dream failed: ${redactErr(err)}`);

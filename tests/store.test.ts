@@ -392,6 +392,29 @@ describe("MemoryStore hybrid recall (pgvector)", () => {
   });
 });
 
+describe("gated recall with embeddings", () => {
+  const axes: Embedder = {
+    provider: "axes", model: "v1", dim: 3,
+    async embed(texts) {
+      return texts.map((t) => {
+        const s = t.toLowerCase();
+        if (s.includes("clip") || s.includes("film") || s.includes("footage")) return [1, 0.1, 0];
+        if (s.includes("invoice") || s.includes("tax")) return [0, 1, 0.1];
+        return [0.1, 0, 1];
+      });
+    },
+  };
+
+  it("injects a semantically close memory with no shared words and nothing for a distant prompt", async () => {
+    const s = new MemoryStore(pool, "husnain", axes);
+    await s.remember({ content: "Footage should always be graded warm" });
+    await s.remember({ content: "Invoices go out on the first of the month" });
+    const hits = await s.recall("cut a short film clip", 3, { gate: true });
+    expect(hits.map((h) => h.content)).toEqual(["Footage should always be graded warm"]);
+    expect(await s.recall("water the garden", 3, { gate: true })).toEqual([]);
+  });
+});
+
 describe("auto-dream gating", () => {
   it("not due on an empty namespace", async () => {
     const s = new MemoryStore(pool, "husnain");
