@@ -1,4 +1,8 @@
+import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import { redactErr } from "./redact.js";
+
+const CONNECT_ATTEMPT_MS = 5000;
+setDefaultAutoSelectFamilyAttemptTimeout(CONNECT_ATTEMPT_MS);
 
 const [, , command] = process.argv;
 

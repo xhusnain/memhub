@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { redactUrl } from "../src/redact.js";
+import { redactUrl, redactErr } from "../src/redact.js";
 
 describe("redactUrl", () => {
   it("redacts a postgres connection string with credentials", () => {
@@ -16,5 +16,14 @@ describe("redactUrl", () => {
 
   it("leaves messages without a connection string unchanged", () => {
     expect(redactUrl("model not found: text-embedding-3-small")).toBe("model not found: text-embedding-3-small");
+  });
+
+  it("names the failure when a connection error has no message of its own", () => {
+    const refused = Object.assign(new Error("connect ETIMEDOUT 3.14.1.1:5432"), { code: "ETIMEDOUT" });
+    const unreachable = Object.assign(new Error("connect EHOSTUNREACH ::1:5432"), { code: "EHOSTUNREACH" });
+    const agg = new AggregateError([refused, unreachable, refused], "");
+    expect(redactErr(agg)).toBe("could not connect (ETIMEDOUT, EHOSTUNREACH)");
+    expect(redactErr(Object.assign(new Error(""), { code: "ECONNRESET" }))).toBe("ECONNRESET");
+    expect(redactErr(new Error(""))).toBe("Error");
   });
 });
